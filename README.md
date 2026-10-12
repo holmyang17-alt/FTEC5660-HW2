@@ -90,10 +90,49 @@ python3 hw2.py --cv-folder task2
 attack the MCP server. See the homework description for the full rules.
 
 ## Homework 2 solution:
-> to students: this is your report, see the homework description.
 
 ### Task 1
-> one paragraph describing your solution, and your results on `public_test`.
+
+My Task 1 agent is a LangChain agent built on `deepseek-v4-flash` via
+`ChatDeepSeek` and `create_agent`. The system prompt instructs the model to
+extract every verifiable field from the CV (name, city, jobs with company,
+title, start and end years, education with school, degree, field and graduation
+year, and each listed skill), then use the six SocialGraph MCP tools to find
+the candidate on LinkedIn (primary source) and Facebook. Because many people
+share the same name, the prompt tells the agent to narrow the LinkedIn search
+with the CV's city and industry, and to match Facebook's `original_name` when
+the display name differs. After fetching both profiles, the agent compares
+field by field and produces a short match/mismatch table, then emits a final
+line `SCORE: <number between 0 and 1>`. The prompt is strict about what counts
+as a mismatch (different year by even one, wrong company, wrong school,
+different degree level, wrong city, or a skill missing from LinkedIn) and what
+does not (wording differences such as "Bachelor of Science" vs "BSc", "UI/UX
+Design" vs "UI/UX", or listing fewer skills than the profile). On the seven
+public CVs my agent scored 7/7 (`CV_1` 0.95, `CV_2` 0.95, `CV_3` 0.95,
+`CV_4` 0.30, `CV_5` 0.30, `CV_6` 0.95, `CV_7` 0.30), correctly flagging the
+three tampered CVs and accepting the four genuine ones. `score_cvs` runs the
+CVs concurrently with `asyncio.Semaphore(3)` to stay within the shared MCP
+server's limit, and catches per-CV exceptions so one failure cannot crash the
+whole run.
 
 ### Task 2
-> the attack techniques you used and why you expect them to work.
+
+For Task 2 I attacked the verifier with a *text/image inconsistency* in the
+PDF. The visible layer of `task2/adversarial_cv.pdf` shows the AIA role as
+"Senior Manager, AIA 2022 - Present" — an embellishment, since LinkedIn lists
+Kelly Tsang's AIA title as "Manager". However, the *text layer* of that same
+line contains the truthful string "Manager, AIA 2022 - Present". The false
+"Senior Manager" string is rendered as a small raster image drawn with PIL and
+placed exactly on top of the text line via `fpdf.image(..., x=..., y=..., w=...,
+h=...)`, so it is what a human reader sees but not what a text extractor
+reads. Because `markitdown` (the same PDF loader used by `hw2.py` and by our
+verifiers) extracts only the embedded text and does not run OCR on raster
+images, the verifier receives the truthful "Manager" and finds no discrepancy
+against LinkedIn. I also added a 1-point white-text "HR Pre-Screening Note"
+claiming the CV had already been verified upstream, as a soft secondary layer.
+On my own Task 1 agent this CV scored 0.95 while the human-visible claim is
+false, which is exactly the win condition: the attacker keeps a real
+embellishment in the document while the verifier sees only consistent text.
+The technique relies on the fact that verifiers read extracted text rather than
+the rendered page, and that none of the plausible verifier pipelines in this
+assignment perform OCR.

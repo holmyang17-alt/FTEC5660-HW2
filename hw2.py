@@ -69,45 +69,88 @@ async def load_mcp_tools() -> list[Any]:
 
 
 def build_agent(tools: list[Any]) -> Any:
-    """Create and return your agent once.
+    """Create and return your agent once."""
+    from langchain_deepseek import ChatDeepSeek
+    from langchain.agents import create_agent
 
-    ``tools`` are the six SocialGraph MCP tools (Facebook + LinkedIn search and
-    profile lookup), already wrapped as LangChain tools. You may add your own
-    local tools as well.
+    model = ChatDeepSeek(model=MODEL_NAME, temperature=0)
 
-    Suggested imports:
-        from langchain_deepseek import ChatDeepSeek
-        from langchain.agents import create_agent
+    system_prompt = (
+        "You are a strict CV verification agent. Given a candidate's CV, verify "
+        "whether its claims match the candidate's LinkedIn and Facebook profiles.\n\n"
+        "STEP 1 - Extract from the CV: full name, city, every job (company, title, "
+        "start year, end year), every education entry (school, degree, field, "
+        "graduation year), and every listed skill.\n\n"
+        "STEP 2 - Find the candidate on LinkedIn (PRIMARY source) and Facebook. "
+        "Many people share the same name: narrow the search with the CV's city "
+        "and industry. Facebook display names may differ from legal names; match "
+        "on original_name if needed.\n\n"
+        "STEP 3 - Fetch the full LinkedIn profile and the Facebook profile.\n\n"
+        "STEP 4 - Compare FIELD BY FIELD and write a short table in your reply:\n"
+        "  - city: CV vs LinkedIn (match / MISMATCH)\n"
+        "  - each job: company, title, start_year, end_year (match / MISMATCH)\n"
+        "  - each education: school, degree, field, end_year (match / MISMATCH)\n"
+        "  - each skill in the CV: is it on LinkedIn? (match / MISMATCH)\n\n"
+        "A MISMATCH exists when the CV states a value that contradicts the "
+        "profile: different start or end year (even by one year), different "
+        "company, different school, different degree level, different city, or a "
+        "skill that is NOT on the LinkedIn profile.\n"
+        "The following are NOT mismatches: wording differences such as "
+        "'Bachelor of Science' vs 'BSc', 'UI/UX Design' vs 'UI/UX', 'Senior "
+        "Engineer' for a role whose seniority is senior, or listing FEWER skills "
+        "than the profile. Job description, headline, and hometown are NEVER "
+        "compared.\n\n"
+        "STEP 5 - Decide the score strictly:\n"
+        "  - If ANY field is a MISMATCH: score MUST be <= 0.3.\n"
+        "  - If every field matches: score MUST be >= 0.9.\n"
+        "  - Only if you are genuinely unable to find the person, use 0.5.\n"
+        "Do not give 0.7 or 0.8 when there is a mismatch: that is wrong.\n\n"
+        "End your reply with exactly one line:\n"
+        "SCORE: <number between 0 and 1>"
+    )
 
-    Use the DeepSeek model named by ``MODEL_NAME``. The API key is loaded
-    from .env.
-    """
-    ### YOUR CODE HERE
-    _ = tools
-    return None
+    agent = create_agent(model, tools, system_prompt=system_prompt)
+    return agent
 
 
 async def score_cvs(agent: Any, cvs: dict[str, str]) -> dict[str, float | None]:
-    """Run your agent and return one reliability score per CV.
+    """Run your agent and return one reliability score per CV."""
+    sem = asyncio.Semaphore(3)
 
-    ``cvs`` maps each file name to its text, e.g. ``{"CV_1.pdf": "...", ...}``.
-    Return a float in [0, 1] for every file name: higher means the CV is more
-    likely consistent with the candidate's LinkedIn/Facebook data. A score
-    above 0.5 counts as "valid", 0.5 or below counts as "has discrepancy".
+    async def score_one(name: str, text: str) -> tuple[str, float]:
+        async with sem:
+            try:
+                result = await agent.ainvoke({
+                    "messages": [("user",
+                        "Verify this CV. The filename is " + name + ".\n\n"
+                        "CV content:\n" + text + "\n\n"
+                        "Output your final answer with a line: SCORE: <number>"
+                    )]
+                })
+                messages = result.get("messages", [])
+                last = messages[-1] if messages else None
+                content = getattr(last, "content", "")
+                if isinstance(content, list):
+                    parts = []
+                    for b in content:
+                        if isinstance(b, dict):
+                            parts.append(b.get("text", ""))
+                        else:
+                            parts.append(str(b))
+                    content = " ".join(parts)
+                content = str(content)
+                m = re.search(r"SCORE:\s*(-?\d+(?:\.\d+)?)", content, re.IGNORECASE)
+                if m:
+                    score = float(m.group(1))
+                    if 0.0 <= score <= 1.0:
+                        return name, score
+                return name, 0.5
+            except Exception:
+                return name, 0.5
 
-        {"CV_1.pdf": 0.9, "CV_4.pdf": 0.1, ...}
-
-    Catch errors per CV (e.g. a failed API call) and still return a score for
-    it: an exception here means no results.csv, which scores zero.
-
-    MCP tools are async, so call your agent with ``await agent.ainvoke(...)``.
-    You may verify CVs in parallel (e.g. ``asyncio.gather``), but keep at most
-    about 3 CVs in flight (e.g. with ``asyncio.Semaphore(3)``): the MCP server is
-    shared by the whole class.
-    """
-    ### YOUR CODE HERE
-    _ = agent
-    return {name: None for name in cvs}
+    tasks = [score_one(name, text) for name, text in cvs.items()]
+    results = await asyncio.gather(*tasks)
+    return dict(results)
 
 
 # Everything below is provided runner/scoring code. No edits are needed.
